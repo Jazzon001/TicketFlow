@@ -240,3 +240,157 @@ ORDER BY
     tasa_resolucion_porcentaje DESC,
     tecnico ASC;
 GO
+
+
+/* ==========================================================
+CONSULTA 3
+Análisis de categorías con tickets vencidos
+
+Técnica:
+GROUP BY + HAVING + agregaciones condicionales + prioridad predominante
+
+Objetivo:
+Para cada categoría con más de 3 tickets registrados, calcular:
+total de tickets, tickets vencidos, porcentaje de vencidos,
+tickets cerrados, horas promedio de resolución y prioridad
+más frecuente asignada.
+
+Adaptación:
+La consulta original estaba diseñada para PostgreSQL usando
+FILTER condicional y MODE(). En SQL Server se adapta usando
+SUM(CASE WHEN ... THEN 1 ELSE 0 END) para el FILTER condicional
+y OUTER APPLY + TOP 1 + GROUP BY para obtener la prioridad
+predominante.
+
+Regla SLA aplicada:
+Alta  = 24 horas
+Media = 72 horas
+Baja  = 120 horas
+========================================================== */
+
+WITH tickets_calculados AS (
+    SELECT
+        t.id_ticket,
+        t.id_categoria,
+
+        CASE
+            WHEN UPPER(LTRIM(RTRIM(t.prioridad))) IN ('ALTA', 'CRITICA', 'CRÍTICA') THEN 'Alta'
+            WHEN UPPER(LTRIM(RTRIM(t.prioridad))) = 'MEDIA' THEN 'Media'
+            WHEN UPPER(LTRIM(RTRIM(t.prioridad))) = 'BAJA' THEN 'Baja'
+            ELSE 'Media'
+        END AS prioridad_normalizada,
+
+        CASE
+            WHEN UPPER(LTRIM(RTRIM(t.prioridad))) IN ('ALTA', 'CRITICA', 'CRÍTICA') THEN 24
+            WHEN UPPER(LTRIM(RTRIM(t.prioridad))) = 'MEDIA' THEN 72
+            WHEN UPPER(LTRIM(RTRIM(t.prioridad))) = 'BAJA' THEN 120
+            ELSE 72
+        END AS sla_horas,
+
+        t.estado,
+        t.fecha_creacion,
+        t.fecha_actualizacion,
+
+        DATEADD(
+            HOUR,
+            CASE
+                WHEN UPPER(LTRIM(RTRIM(t.prioridad))) IN ('ALTA', 'CRITICA', 'CRÍTICA') THEN 24
+                WHEN UPPER(LTRIM(RTRIM(t.prioridad))) = 'MEDIA' THEN 72
+                WHEN UPPER(LTRIM(RTRIM(t.prioridad))) = 'BAJA' THEN 120
+                ELSE 72
+            END,
+            t.fecha_creacion
+        ) AS fecha_limite_calculada
+    FROM Tickets t
+    WHERE t.fecha_creacion IS NOT NULL
+),
+resumen_categoria AS (
+    SELECT
+        c.id_categoria,
+        c.nombre AS categoria,
+
+        COUNT(tc.id_ticket) AS total_tickets,
+
+        SUM(
+            CASE
+                WHEN UPPER(tc.estado) NOT IN ('CERRADO', 'RESUELTO', 'CANCELADO')
+                 AND GETDATE() > tc.fecha_limite_calculada
+                THEN 1 ELSE 0
+            END
+        ) AS tickets_vencidos,
+
+        CAST(
+            SUM(
+                CASE
+                    WHEN UPPER(tc.estado) NOT IN ('CERRADO', 'RESUELTO', 'CANCELADO')
+                     AND GETDATE() > tc.fecha_limite_calculada
+                    THEN 1 ELSE 0
+                END
+            ) * 100.0 / NULLIF(COUNT(tc.id_ticket), 0)
+            AS DECIMAL(6,2)
+        ) AS porcentaje_vencidos,
+
+        SUM(
+            CASE
+                WHEN UPPER(tc.estado) IN ('CERRADO', 'RESUELTO')
+                THEN 1 ELSE 0
+            END
+        ) AS tickets_cerrados,
+
+        CAST(
+            AVG(
+                CASE
+                    WHEN UPPER(tc.estado) IN ('CERRADO', 'RESUELTO')
+                     AND tc.fecha_actualizacion IS NOT NULL
+                    THEN DATEDIFF(HOUR, tc.fecha_creacion, tc.fecha_actualizacion) * 1.0
+                END
+            ) AS DECIMAL(10,2)
+        ) AS horas_promedio_resolucion
+
+    FROM Categorias c
+    INNER JOIN tickets_calculados tc
+        ON tc.id_categoria = c.id_categoria
+    GROUP BY
+        c.id_categoria,
+        c.nombre
+    HAVING COUNT(tc.id_ticket) > 3
+)
+SELECT
+    rc.id_categoria,
+    rc.categoria,
+    rc.total_tickets,
+    rc.tickets_vencidos,
+    rc.porcentaje_vencidos,
+    rc.tickets_cerrados,
+    rc.horas_promedio_resolucion,
+    ISNULL(pp.prioridad_predominante, 'Sin prioridad') AS prioridad_predominante,
+
+    CASE
+        WHEN rc.porcentaje_vencidos >= 50 THEN 'Categoría crítica'
+        WHEN rc.porcentaje_vencidos >= 25 THEN 'Requiere seguimiento'
+        WHEN rc.tickets_vencidos = 0 THEN 'Sin vencimientos'
+        ELSE 'Controlada'
+    END AS evaluacion_categoria
+
+FROM resumen_categoria rc
+OUTER APPLY (
+    SELECT TOP 1
+        tc2.prioridad_normalizada AS prioridad_predominante
+    FROM tickets_calculados tc2
+    WHERE tc2.id_categoria = rc.id_categoria
+    GROUP BY tc2.prioridad_normalizada
+    ORDER BY
+        COUNT(*) DESC,
+        CASE tc2.prioridad_normalizada
+            WHEN 'Alta' THEN 3
+            WHEN 'Media' THEN 2
+            WHEN 'Baja' THEN 1
+            ELSE 0
+        END DESC
+) pp
+ORDER BY
+    rc.porcentaje_vencidos DESC,
+    rc.total_tickets DESC,
+    rc.categoria ASC;
+GO
+
