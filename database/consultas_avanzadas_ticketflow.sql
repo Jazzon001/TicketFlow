@@ -114,3 +114,129 @@ ORDER BY
     nivel_prioridad DESC,
     fecha_creacion ASC;
 GO
+
+/* ==========================================================
+CONSULTA 2
+Carga de trabajo y tasa de resolución por técnico
+
+Técnica:
+Subconsultas correlacionadas múltiples + cálculo de ratio
+
+Objetivo:
+Para cada técnico/agente del sistema, calcular cuántos tickets
+tiene activos, cuántos ha resuelto históricamente, el total de
+tickets asignados y su tasa de resolución porcentual.
+
+Adaptación:
+El documento original menciona asignacion_ticket y estados_ticket,
+pero en el modelo real restaurado de TicketFlow esa información
+está dentro de la tabla Tickets mediante id_usuario_asignado y estado.
+========================================================== */
+
+SELECT
+    u.id_usuario,
+    u.nombre AS tecnico,
+    u.email,
+    r.nombre AS rol,
+
+    /* Tickets activos asignados actualmente */
+    (
+        SELECT COUNT(*)
+        FROM Tickets t1
+        WHERE t1.id_usuario_asignado = u.id_usuario
+          AND UPPER(t1.estado) NOT IN ('CERRADO', 'RESUELTO', 'CANCELADO')
+    ) AS tickets_activos_asignados,
+
+    /* Tickets cerrados o resueltos históricamente */
+    (
+        SELECT COUNT(*)
+        FROM Tickets t2
+        WHERE t2.id_usuario_asignado = u.id_usuario
+          AND UPPER(t2.estado) IN ('CERRADO', 'RESUELTO')
+    ) AS tickets_resueltos_historicos,
+
+    /* Total de tickets asignados al técnico */
+    (
+        SELECT COUNT(*)
+        FROM Tickets t3
+        WHERE t3.id_usuario_asignado = u.id_usuario
+    ) AS total_tickets_asignados,
+
+    /* Tickets activos de prioridad alta */
+    (
+        SELECT COUNT(*)
+        FROM Tickets t4
+        WHERE t4.id_usuario_asignado = u.id_usuario
+          AND UPPER(t4.estado) NOT IN ('CERRADO', 'RESUELTO', 'CANCELADO')
+          AND UPPER(t4.prioridad) IN ('ALTA', 'CRITICA', 'CRÍTICA')
+    ) AS tickets_altos_activos,
+
+    /* Tasa de resolución porcentual */
+    CAST(
+        CASE
+            WHEN (
+                SELECT COUNT(*)
+                FROM Tickets t5
+                WHERE t5.id_usuario_asignado = u.id_usuario
+            ) = 0 THEN 0
+            ELSE
+                (
+                    (
+                        SELECT COUNT(*)
+                        FROM Tickets t6
+                        WHERE t6.id_usuario_asignado = u.id_usuario
+                          AND UPPER(t6.estado) IN ('CERRADO', 'RESUELTO')
+                    ) * 100.0
+                )
+                /
+                (
+                    SELECT COUNT(*)
+                    FROM Tickets t7
+                    WHERE t7.id_usuario_asignado = u.id_usuario
+                )
+        END AS DECIMAL(6,2)
+    ) AS tasa_resolucion_porcentaje,
+
+    /* Clasificación operacional */
+    CASE
+        WHEN (
+            SELECT COUNT(*)
+            FROM Tickets t8
+            WHERE t8.id_usuario_asignado = u.id_usuario
+              AND UPPER(t8.estado) NOT IN ('CERRADO', 'RESUELTO', 'CANCELADO')
+        ) >= 5 THEN 'Sobrecargado'
+
+        WHEN (
+            SELECT COUNT(*)
+            FROM Tickets t9
+            WHERE t9.id_usuario_asignado = u.id_usuario
+              AND UPPER(t9.estado) NOT IN ('CERRADO', 'RESUELTO', 'CANCELADO')
+        ) BETWEEN 2 AND 4 THEN 'Carga media'
+
+        WHEN (
+            SELECT COUNT(*)
+            FROM Tickets t10
+            WHERE t10.id_usuario_asignado = u.id_usuario
+        ) = 0 THEN 'Sin tickets asignados'
+
+        ELSE 'Carga baja'
+    END AS estado_carga
+
+FROM Usuarios u
+INNER JOIN Roles r
+    ON r.id_rol = u.id_rol
+WHERE
+    u.activo = 1
+    AND (
+        UPPER(r.nombre) IN ('AGENTE', 'TECNICO', 'TÉCNICO')
+        OR EXISTS (
+            SELECT 1
+            FROM Tickets tx
+            WHERE tx.id_usuario_asignado = u.id_usuario
+        )
+    )
+ORDER BY
+    tickets_activos_asignados DESC,
+    tasa_resolucion_porcentaje DESC,
+    tecnico ASC;
+GO
