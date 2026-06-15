@@ -394,3 +394,115 @@ ORDER BY
     rc.categoria ASC;
 GO
 
+
+
+/* ==========================================================
+CONSULTA 4
+Evolución semanal de tickets con LAG y acumulado
+
+Técnica:
+Window Functions: SUM() OVER + LAG()
+
+Objetivo:
+Mostrar, para las últimas 12 semanas, cuántos tickets se crearon
+por semana agrupados por estado, el acumulado corrido por estado
+y la variación respecto a la semana anterior.
+
+Adaptación:
+La consulta original menciona tickets y estados_ticket.
+En el modelo real de TicketFlow en SQL Server, el estado del ticket
+se almacena directamente en la tabla Tickets mediante la columna estado.
+========================================================== */
+
+WITH numeros AS (
+    SELECT 0 AS n UNION ALL
+    SELECT 1 UNION ALL
+    SELECT 2 UNION ALL
+    SELECT 3 UNION ALL
+    SELECT 4 UNION ALL
+    SELECT 5 UNION ALL
+    SELECT 6 UNION ALL
+    SELECT 7 UNION ALL
+    SELECT 8 UNION ALL
+    SELECT 9 UNION ALL
+    SELECT 10 UNION ALL
+    SELECT 11
+),
+semanas AS (
+    SELECT
+        DATEADD(
+            WEEK,
+            -n,
+            DATEADD(WEEK, DATEDIFF(WEEK, 0, GETDATE()), 0)
+        ) AS semana_inicio
+    FROM numeros
+),
+estados AS (
+    SELECT DISTINCT
+        LTRIM(RTRIM(estado)) AS estado
+    FROM Tickets
+    WHERE estado IS NOT NULL
+),
+tickets_por_semana AS (
+    SELECT
+        DATEADD(WEEK, DATEDIFF(WEEK, 0, t.fecha_creacion), 0) AS semana_inicio,
+        LTRIM(RTRIM(t.estado)) AS estado,
+        COUNT(*) AS tickets_creados_semana
+    FROM Tickets t
+    WHERE t.fecha_creacion >= DATEADD(
+        WEEK,
+        -11,
+        DATEADD(WEEK, DATEDIFF(WEEK, 0, GETDATE()), 0)
+    )
+    GROUP BY
+        DATEADD(WEEK, DATEDIFF(WEEK, 0, t.fecha_creacion), 0),
+        LTRIM(RTRIM(t.estado))
+),
+base_evolucion AS (
+    SELECT
+        s.semana_inicio,
+        e.estado,
+        ISNULL(tps.tickets_creados_semana, 0) AS tickets_creados_semana
+    FROM semanas s
+    CROSS JOIN estados e
+    LEFT JOIN tickets_por_semana tps
+        ON tps.semana_inicio = s.semana_inicio
+       AND tps.estado = e.estado
+),
+evolucion AS (
+    SELECT
+        semana_inicio,
+        estado,
+        tickets_creados_semana,
+
+        SUM(tickets_creados_semana) OVER (
+            PARTITION BY estado
+            ORDER BY semana_inicio ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS acumulado_por_estado,
+
+        LAG(tickets_creados_semana, 1, 0) OVER (
+            PARTITION BY estado
+            ORDER BY semana_inicio ASC
+        ) AS tickets_semana_anterior
+    FROM base_evolucion
+)
+SELECT
+    semana_inicio,
+    estado,
+    tickets_creados_semana,
+    acumulado_por_estado,
+    tickets_semana_anterior,
+    tickets_creados_semana - tickets_semana_anterior AS variacion_vs_semana_anterior,
+
+    CASE
+        WHEN tickets_creados_semana - tickets_semana_anterior > 0 THEN 'Aumentó'
+        WHEN tickets_creados_semana - tickets_semana_anterior < 0 THEN 'Disminuyó'
+        ELSE 'Sin variación'
+    END AS tendencia_semanal
+
+FROM evolucion
+ORDER BY
+    semana_inicio DESC,
+    estado ASC;
+GO
